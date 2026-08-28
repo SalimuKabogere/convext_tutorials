@@ -1,71 +1,75 @@
-import { internalAction, mutation, query } from "./_generated/server";
+// my first mutation 
+// import the mutation and the validator
+
+import { query, mutation, internalAction } from "./_generated/server";
 import { v } from "convex/values";
-import { MutationCtx, QueryCtx } from "./_generated/server";
+import { api, internal } from "./_generated/api";
+import { scheduler } from "timers/promises";
 
+// we define the mutation that sends a message to the db
+// It takes user and the body as the args
 
-export const sendMessage = mutation(
-  {
-    args: {
-      user: v.string(),
-      body: v.string(),
-    },
-    handler: async (ctx: MutationCtx, args: { user: string; body: string }) => {
-        // console.log("This typescript message is running on the server!");
+export const sendMessage = mutation({
+  args: {
+    user: v.string(),
+    body: v.string(),
+  },
 
-        // first insert the message into the database
-        await ctx.db.insert("messages", {
-            user: args.user,
-            body: args.body,
-        });
+  // define the handler function that will be called when the mutation is invoked
 
-        // sth that could occure
-        if (args.user == 'evil') throw new Error('Evil user detected!');
+  handler: async (ctx, args) => {
+    // log sth to the server console
+    console.log("sendMessage mutation called with args:", args);
 
-        // second insert
-        await ctx.db.insert("events", {
-            user: args.user,
-            message: "Message sent successfully",
-        });
-    },
+    // insert the message into the db
+    const message = await ctx.db.insert("messages", {
+      user: args.user,
+      body: args.body,
+    });
+
+    // if the message starts with /wiki, we want to get the summary from wikipedia and send it as a message
+    if (args.body.startsWith("/wiki")) {
+      const topic = args.body.split(" ")[1];
+      const summary = await ctx.scheduler.runAfter(0, internal.chat.getWikipediaSummary, { topic });
+    }
   }
-);
+});
 
-// add a query
+// add a query to get the messages from the db
+
 export const getMessages = query({
-  args:{},
-  handler: async (ctx: QueryCtx) => {
-    const messages = await ctx.db.query("messages").collect();
-    return messages.reverse(); // return the messages in ascending order
-  } 
+  args: {},
+  handler: async (ctx) => {
+    // get most recent messages first
+    const messages = await ctx.db.query("messages").order("desc").collect();
+    return messages.reverse(); // reverse the order to get oldest messages first
+  }
+
 })
 
-// we use actions if we want to connect to an external API, like OpenAI, or if we want to do something that is not allowed in a mutation or query, like sending an email.
+// add an action to connect to the wikipedia api and get a random article
 
 export const getWikipediaSummary = internalAction({
   args: {
     topic: v.string(),
   },
   handler: async (ctx, args) => {
-    console.log("Wikipedia topic:", args.topic);
-
-    const topic = args.topic.startsWith("wiki:")
-      ? args.topic.slice("wiki:".length).trim()
-      : args.topic;
-
     const response = await fetch(
-      `https://en.wikipedia.org/w/api.php?format=json&action=query&prop=extracts&exintro&explaintext=1&titles=${encodeURIComponent(topic)}`
+      "https://en.wikipedia.org/w/api.php?format=json&action=query&prop=extracts&exintro&explaintext&redirects=1&titles=" + args.topic,
     );
 
-    const json = await response.json();
-    console.log("Wikipedia response:", json);
+    // return getSummaryFromJSON(await response.json());
+    const summary = getSummaryFromJSON(await response.json());
+    await ctx.scheduler.runAfter(0, api.chat.sendMessage, {
+      user: "Wikipedia",
+      body: summary,
+    })
+    
+  }
+})
 
-    return getSummaryFromJSON(json);
-  },
-});
-
-function getSummaryFromJSON(json: any): string {
-  const pages = json?.query?.pages;
-  const firstPageId = Object.keys(pages ?? {})[0];
-  return pages?.[firstPageId]?.extract ?? "No summary found.";
+export function getSummaryFromJSON(data: any) {
+  const firstPageId = Object.keys(data.query.pages)[0];
+  const summary = data.query.pages[firstPageId].extract;
+  return summary;
 }
-
